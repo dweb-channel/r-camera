@@ -13,7 +13,8 @@ use esp_idf_svc::wifi::EspWifi;
 use log::{debug, info, warn};
 use std::error::Error;
 use std::sync::{Arc, Condvar, Mutex};
-use heapless::{String as HString, Vec as HVec};
+use std::env;
+use heapless::Vec as HVec;
 use enumset::enum_set;
 use esp_idf_svc::sys::EspError;
 
@@ -24,6 +25,13 @@ pub enum ConnectionType {
     Bluetooth,
 }
 
+// WiFi凭证将在运行时从环境变量获取，而不是编译时
+// 使用 env::var 替代 env! 宏
+fn get_wifi_credentials() -> Result<(String, String), Box<dyn Error>> {
+    let ssid = env::var("WIFI_SSID")?;
+    let password = env::var("WIFI_PASS")?;
+    Ok((ssid, password))
+}
 
 /// 蓝牙服务器状态
 struct BluetoothServerState {
@@ -169,7 +177,7 @@ impl WirelessManager {
                 }
             }
             ConnectionType::Bluetooth => {
-                if let ConnectionConfig::Bluetooth(device_name) = config {
+                if let ConnectionConfig::Bluetooth(_device_name) = config {
                     // 为了简化，假设我们已经有一个特征引用
                     // 在实际应用中，我们需要管理GATT服务器并获取正确的特征引用
 
@@ -243,18 +251,16 @@ impl WirelessManager {
         if let ConnectionConfig::WiFi(ssid, pass) = config {
             debug!("连接到WiFi网络: {}", ssid);
 
-            // 将 ssid 和 pass 转换为 heapless::String<32>
-            let h_ssid: HString<32> = HString::from(ssid.as_str());
-            let h_pass: HString<64> = HString::from(pass.as_str()); // 密码通常更长
-
-            let wifi_config = Configuration::Client(ClientConfiguration {
-                ssid: SSID.try_into().unwrap(),
-                password: h_pass,
+            let wifi_configuration = Configuration::Client(ClientConfiguration {
+                ssid: ssid.as_str().try_into().unwrap(),
+                bssid: None,
+                password: pass.as_str().try_into().unwrap(),
                 auth_method: AuthMethod::WPA2Personal,
+                channel: None,
                 ..Default::default()
             });
 
-            wifi.set_configuration(&wifi_config)?;
+            wifi.set_configuration(&wifi_configuration)?;
             wifi.start()?;
             wifi.connect()?;
 
@@ -387,9 +393,12 @@ impl BluetoothServer {
                     
                     // 只向已订阅的客户端发送
                     if conn.subscribed {
-                        self.gatts.indicate(gatt_if, conn.conn_id, ind_handle, data)?;
-                        state.ind_confirmed = Some(conn.peer);
-                        debug!("已向客户端 {} 发送数据", conn.peer);
+                        let conn_id = conn.conn_id;  
+                        let peer_addr = conn.peer; 
+                        
+                        self.gatts.indicate(gatt_if, conn_id, ind_handle, data)?;
+                        state.ind_confirmed = Some(peer_addr);
+                        debug!("已向客户端 {} 发送数据", peer_addr);
                     }
                     break;
                 } else {
@@ -811,9 +820,8 @@ impl WifiSender {
 impl DataSender for WifiSender {
     fn send_data(&self, data: &[u8]) -> Result<usize, Box<dyn Error>> {
         // 通过WiFi发送数据
-        if let Some(stream) = &self.client {
-            // 在真实场景中，我们需要使用指定协议将数据写入stream
-            // 这里仅作为示例，实际实现可能更复杂
+        if let Some(_stream) = &self.client {
+            // todo，我们需要使用指定协议将数据写入stream
             debug!("尝试通过WiFi发送{}字节的数据", data.len());
             Ok(data.len()) // 假设发送成功
         } else {

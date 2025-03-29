@@ -38,7 +38,7 @@ esp-idf-hal = "0.45.2"
 # mtp = "0.5.2"  
 
 # WiFi和蓝牙相关
-embedded-svc = "0.26"
+embedded-svc = "0.28.1"
 
 # 数据处理相关
 bytes = "1.5"

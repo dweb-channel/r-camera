@@ -50,7 +50,7 @@ fn run_system() -> Result<(), Box<dyn std::error::Error>> {
     // 配置ESP32作为接入点
     let wifi_config = ConnectionConfig::WiFi(
         "ESP32Camera".into(), // SSID
-        "password123".into()  // 密码
+        "123456".into()  // 密码
     );
     wireless.connect(&wifi_config)?;
     
