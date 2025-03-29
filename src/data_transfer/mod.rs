@@ -146,7 +146,8 @@ impl TransferManager {
             return Ok(());
         }
         
-        let sender = match &self.data_sender {
+        // 使用可变引用获取 sender
+        let sender = match &mut self.data_sender {
             Some(s) => s,
             None => return Err("未设置数据发送器".into()),
         };
@@ -179,7 +180,7 @@ impl TransferManager {
                 }
             }
             
-            // 发送数据
+            // 使用可变引用调用 send_data 方法
             let bytes_sent = sender.send_data(&packet.data)?;
             self.total_bytes_transferred += bytes_sent;
         }

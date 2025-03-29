@@ -1,5 +1,6 @@
 // 无线连接模块 - 负责ESP32与手机之间的蓝牙/WiFi通信
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration};
+use enumset::enum_set;
 use esp_idf_svc::bt::ble::gap::{AdvConfiguration, BleGapEvent, EspBleGap};
 use esp_idf_svc::bt::ble::gatt::server::{ConnectionId, EspGatts, GattsEvent, TransferId};
 use esp_idf_svc::bt::ble::gatt::{
@@ -9,15 +10,14 @@ use esp_idf_svc::bt::ble::gatt::{
 use esp_idf_svc::bt::{BdAddr, Ble as EspBle, BtDriver, BtStatus, BtUuid};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::wifi::EspWifi;
-use log::{debug, info, warn};
-use std::error::Error;
-use std::sync::{Arc, Condvar, Mutex};
-use std::env;
-use heapless::Vec as HVec;
-use enumset::enum_set;
 use esp_idf_svc::sys::EspError;
-use std::io::{self, Write};
+use esp_idf_svc::wifi::EspWifi;
+use heapless::Vec as HVec;
+use log::{debug, info, warn};
+use std::env;
+use std::error::Error;
+use std::io::Write;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// 无线连接类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -298,7 +298,7 @@ impl WirelessManager {
 
             // 配置设备名称和广播参数
             gap.set_device_name(device_name)?;
-            
+
             // 设置广播配置
             let service_uuid = BtUuid::uuid128(0xad91b201734740479e173bed82d75f9d); // 使用示例中的UUID
             gap.set_adv_conf(&AdvConfiguration {
@@ -339,9 +339,9 @@ impl WirelessManager {
                 gatts: self.ble_gatts.as_ref().unwrap().clone(),
                 state: state.clone(),
                 condvar: condvar.clone(),
-                device_name: "ESP32".to_string(),  // 默认设备名
+                device_name: "ESP32".to_string(), // 默认设备名
             };
-            
+
             server.indicate(data)?;
             debug!("通过蓝牙广播数据: {} 字节", data.len());
             Ok(())
@@ -363,12 +363,12 @@ struct BluetoothServer {
 
 impl BluetoothServer {
     /// 发送数据到所有已订阅的客户端
-    /// 
+    ///
     /// 对于使用Indication特性的发送，需要等待确认
     /// 通过Mutex和Condvar实现同步等待
     fn indicate(&self, data: &[u8]) -> Result<(), EspError> {
         const MAX_CONNECTIONS: usize = 4;
-        
+
         for peer_index in 0..MAX_CONNECTIONS {
             // 向所有已连接且订阅的客户端发送数据
             let mut state = self.state.lock().unwrap();
@@ -391,12 +391,12 @@ impl BluetoothServer {
 
                 if state.ind_confirmed.is_none() {
                     let conn = &state.connections[peer_index];
-                    
+
                     // 只向已订阅的客户端发送
                     if conn.subscribed {
-                        let conn_id = conn.conn_id;  
-                        let peer_addr = conn.peer; 
-                        
+                        let conn_id = conn.conn_id;
+                        let peer_addr = conn.peer;
+
                         self.gatts.indicate(gatt_if, conn_id, ind_handle, data)?;
                         state.ind_confirmed = Some(peer_addr);
                         debug!("已向客户端 {} 发送数据", peer_addr);
@@ -442,17 +442,31 @@ impl BluetoothServer {
                     }
                 }
             }
-            GattsEvent::ServiceCreated { status, service_handle, .. } => {
+            GattsEvent::ServiceCreated {
+                status,
+                service_handle,
+                ..
+            } => {
                 if status == GattStatus::Ok {
                     self.configure_and_start_service(service_handle)?;
                 }
             }
-            GattsEvent::CharacteristicAdded { status, attr_handle, service_handle, char_uuid } => {
+            GattsEvent::CharacteristicAdded {
+                status,
+                attr_handle,
+                service_handle,
+                char_uuid,
+            } => {
                 if status == GattStatus::Ok {
                     self.register_characteristic(service_handle, attr_handle, char_uuid)?;
                 }
             }
-            GattsEvent::DescriptorAdded { status, attr_handle, service_handle, descr_uuid } => {
+            GattsEvent::DescriptorAdded {
+                status,
+                attr_handle,
+                service_handle,
+                descr_uuid,
+            } => {
                 if status == GattStatus::Ok {
                     self.register_cccd_descriptor(service_handle, attr_handle, descr_uuid)?;
                 }
@@ -466,11 +480,24 @@ impl BluetoothServer {
             GattsEvent::PeerDisconnected { addr, .. } => {
                 self.delete_conn(addr)?;
             }
-            GattsEvent::Write { conn_id, trans_id, addr, handle, offset, need_rsp, is_prep, value } => {
-                let handled = self.recv(gatt_if, conn_id, trans_id, addr, handle, offset, need_rsp, is_prep, &value)?;
-                
+            GattsEvent::Write {
+                conn_id,
+                trans_id,
+                addr,
+                handle,
+                offset,
+                need_rsp,
+                is_prep,
+                value,
+            } => {
+                let handled = self.recv(
+                    gatt_if, conn_id, trans_id, addr, handle, offset, need_rsp, is_prep, &value,
+                )?;
+
                 if handled && need_rsp {
-                    self.send_write_response(gatt_if, conn_id, trans_id, handle, offset, need_rsp, is_prep, &value)?;
+                    self.send_write_response(
+                        gatt_if, conn_id, trans_id, handle, offset, need_rsp, is_prep, &value,
+                    )?;
                 }
             }
             GattsEvent::Confirm { status, .. } => {
@@ -513,7 +540,7 @@ impl BluetoothServer {
 
         // 启动服务
         self.gatts.start_service(service_handle)?;
-        
+
         // 添加特性
         self.add_characteristics(service_handle)?;
 
@@ -565,10 +592,12 @@ impl BluetoothServer {
 
             if state.service_handle != Some(service_handle) {
                 false
-            } else if char_uuid == BtUuid::uuid128(0xb6fccb5087be44f3ae22f85485ea42c4) { // RECV UUID
+            } else if char_uuid == BtUuid::uuid128(0xb6fccb5087be44f3ae22f85485ea42c4) {
+                // RECV UUID
                 state.recv_handle = Some(attr_handle);
                 false
-            } else if char_uuid == BtUuid::uuid128(0x503de214868246c4828fd59144da41be) { // IND UUID
+            } else if char_uuid == BtUuid::uuid128(0x503de214868246c4828fd59144da41be) {
+                // IND UUID
                 state.ind_handle = Some(attr_handle);
                 true
             } else {
@@ -710,8 +739,10 @@ impl BluetoothServer {
             }
         } else if Some(handle) == recv_handle {
             // 处理收到的数据
-            info!("收到客户端 {} 数据: {:?}, 偏移量: {}, MTU: {:?}", 
-                addr, value, offset, conn.mtu);
+            info!(
+                "收到客户端 {} 数据: {:?}, 偏移量: {}, MTU: {:?}",
+                addr, value, offset, conn.mtu
+            );
         } else {
             return Ok(false);
         }
@@ -766,7 +797,7 @@ impl BluetoothServer {
     /// 确认indication已被客户端接收
     fn confirm_indication(&self) -> Result<(), EspError> {
         let mut state = self.state.lock().unwrap();
-        
+
         // 释放确认标志，允许发送下一个indication
         state.ind_confirmed = None;
         self.condvar.notify_all();
@@ -889,7 +920,7 @@ impl DataSender for BluetoothSender {
 
         // 发送数据
         server.indicate(data)?;
-        
+
         // 返回发送的字节数
         Ok(data.len())
     }
@@ -898,7 +929,7 @@ impl DataSender for BluetoothSender {
     fn close(&mut self) -> Result<(), Box<dyn Error>> {
         // 停止广播
         self.gap.stop_advertising()?;
-        
+
         info!("蓝牙发送器已关闭");
         Ok(())
     }
