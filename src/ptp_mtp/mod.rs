@@ -1,5 +1,5 @@
 // PTP/MTP协议处理模块 - 负责与相机进行PTP和MTP协议通信
-use log::{info, error, debug};
+use log::{error, debug};
 use std::error::Error;
 
 // TODO
