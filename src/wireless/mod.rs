@@ -17,6 +17,7 @@ use std::env;
 use heapless::Vec as HVec;
 use enumset::enum_set;
 use esp_idf_svc::sys::EspError;
+use std::io::{self, Write};
 
 /// 无线连接类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -783,9 +784,9 @@ pub enum ConnectionConfig {
 /// 数据发送接口
 pub trait DataSender {
     /// 发送数据
-    fn send_data(&self, data: &[u8]) -> Result<usize, Box<dyn Error>>;
+    fn send_data(&mut self, data: &[u8]) -> Result<usize, Box<dyn Error>>;
 
-    /// 关闭发送器
+    /// 关闭连接
     fn close(&mut self) -> Result<(), Box<dyn Error>>;
 }
 
@@ -818,12 +819,21 @@ impl WifiSender {
 }
 
 impl DataSender for WifiSender {
-    fn send_data(&self, data: &[u8]) -> Result<usize, Box<dyn Error>> {
+    fn send_data(&mut self, data: &[u8]) -> Result<usize, Box<dyn Error>> {
         // 通过WiFi发送数据
-        if let Some(_stream) = &self.client {
-            // todo，我们需要使用指定协议将数据写入stream
-            debug!("尝试通过WiFi发送{}字节的数据", data.len());
-            Ok(data.len()) // 假设发送成功
+        if let Some(stream) = &mut self.client {
+            // 使用Write trait将数据写入TCP流
+            // TcpStream 实现了特殊的 Write trait，可以在不可变引用上调用 write
+            match stream.write(data) {
+                Ok(bytes_written) => {
+                    debug!("成功通过WiFi发送{}字节的数据", bytes_written);
+                    Ok(bytes_written)
+                }
+                Err(e) => {
+                    warn!("WiFi数据发送失败: {}", e);
+                    Err(Box::new(e))
+                }
+            }
         } else {
             Err("WiFi客户端未连接".into())
         }
@@ -867,7 +877,7 @@ impl BluetoothSender {
 
 impl DataSender for BluetoothSender {
     /// 通过蓝牙发送数据
-    fn send_data(&self, data: &[u8]) -> Result<usize, Box<dyn Error>> {
+    fn send_data(&mut self, data: &[u8]) -> Result<usize, Box<dyn Error>> {
         // 创建服务器实例
         let server = BluetoothServer {
             gap: self.gap.clone(),
