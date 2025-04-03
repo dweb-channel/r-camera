@@ -30,25 +30,15 @@ esp-idf-sys = { version = "0.36", features = ["binstart"] }
 esp-idf-hal = "0.45.2"
 
 # 外部相机连接相关
-# rusb = "0.9.1"    
-# usb-device = "0.2.9"    
+# libusb = "0.3.0"    
+byteorder = "1.5.0"
 
-# PTP/MTP协议实现
-# ptp = "0.5.0"   
-# mtp = "0.5.2"  
-
-# WiFi和蓝牙相关
-embedded-svc = "0.28.1"
-
-# 数据处理相关
-bytes = "1.5"
 tokio = { version = "1.35", features = ["rt"] }
 futures = "0.3"
 heapless = "0.8.0"
 enumset = "1.1.5"
 
-# 图像处理
-image = { version = "0.25.5", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.6", default-features = false, features = ["jpeg"] }
 
 # UUID支持
 uuid = { version = "1.6", features = ["v4"] }
