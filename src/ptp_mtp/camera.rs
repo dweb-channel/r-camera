@@ -67,13 +67,14 @@ pub struct PtpCamera {
     _ep_int: u8,                    // 中断端点
     current_tid: u32,               // 当前事务ID
     handle: UsbDevice<'static>,     // Embassy-USB设备句柄
+    transport: Arc<Mutex<PtpUsbTransport>>, // PTP传输层
 }
 
 impl PtpCamera {
     /// 创建新的PTP相机实例
     /// 
     /// 使用异步API从USB设备初始化PTP相机
-    pub async fn new(device: UsbDevice<'static>) -> Result<PtpCamera, Error> {
+    pub async fn new(device: UsbDevice<'static>, transport: PtpUsbTransport) -> Result<PtpCamera, Error> {
         // 获取配置描述符
         let config = device.current_config_descriptor().await;
         
@@ -138,6 +139,7 @@ impl PtpCamera {
             _ep_int: ep_int,
             current_tid: 0,
             handle: device,
+            transport: Arc::new(Mutex::new(transport)),
         })
     }
 
