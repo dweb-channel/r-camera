@@ -1,8 +1,8 @@
 #![allow(non_snake_case)]
 
-use std::io::{self, Cursor};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::prelude::*;
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+use std::io::Cursor;
 
 use crate::ptp_mtp::error::Error;
 
@@ -55,9 +55,10 @@ pub trait PtpRead: ReadBytesExt {
 
     /// 读取向量数据的辅助方法
     #[inline(always)]
-    fn read_ptp_vec<T: Sized, U: Fn(&mut Self) -> Result<T, Error>>(&mut self,
-                                                                 func: U)
-                                                                 -> Result<Vec<T>, Error> {
+    fn read_ptp_vec<T: Sized, U: Fn(&mut Self) -> Result<T, Error>>(
+        &mut self,
+        func: U,
+    ) -> Result<Vec<T>, Error> {
         let len = self.read_u32::<LittleEndian>()? as usize;
         (0..len).map(|_| func(self)).collect()
     }
@@ -108,9 +109,12 @@ pub trait PtpRead: ReadBytesExt {
         let len = self.read_u8()?;
         if len > 0 {
             // len包括结尾的null字符(u16)
-            let data: Vec<u16> = (0..(len - 1)).map(|_| self.read_u16::<LittleEndian>()).collect::<Result<_, std::io::Error>>()?;
+            let data: Vec<u16> = (0..(len - 1))
+                .map(|_| self.read_u16::<LittleEndian>())
+                .collect::<Result<_, std::io::Error>>()?;
             self.read_u16::<LittleEndian>()?; // 读取结尾的null
-            String::from_utf16(&data).map_err(|_| Error::Malformed(format!("无效的UTF16数据: {:?}", data)))
+            String::from_utf16(&data)
+                .map_err(|_| Error::Malformed(format!("无效的UTF16数据: {:?}", data)))
         } else {
             Ok("".into())
         }
@@ -125,7 +129,11 @@ impl<T: AsRef<[u8]>> PtpRead for Cursor<T> {
     fn expect_end(&mut self) -> Result<(), Error> {
         let len = self.get_ref().as_ref().len();
         if len as u64 != self.position() {
-            Err(Error::Malformed(format!("响应长度为{}字节，预期{}字节", len, self.position())))
+            Err(Error::Malformed(format!(
+                "响应长度为{}字节，预期{}字节",
+                len,
+                self.position()
+            )))
         } else {
             Ok(())
         }
@@ -264,7 +272,9 @@ impl PtpDataType {
             &STR(ref val) => {
                 out.write_u8(((val.len() as u8) * 2) + 1).ok();
                 if val.len() > 0 {
-                    for e in val.encode_utf16() { out.write_u16::<LittleEndian>(e).ok(); }
+                    for e in val.encode_utf16() {
+                        out.write_u16::<LittleEndian>(e).ok();
+                    }
                     out.write_all(b"\0\0").ok(); // 写入UTF-16结尾的null
                 }
             }

@@ -4,11 +4,17 @@ use std::cmp::min;
 use std::slice;
 use std::time::Duration;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+use std::io::Cursor;
+
+// Embassy相关导入
+use embassy_usb::host::{UsbDevice, ConfigDescriptor};
+use embassy_time::{Duration as EmbassyDuration, Timer};
 
 use crate::ptp_mtp::error::Error;
 use crate::ptp_mtp::standard_codes::{CommandCode, StandardCommandCode, StandardResponseCode, PtpContainerType};
 use crate::ptp_mtp::device_info::{PtpDeviceInfo, PtpObjectInfo, PtpStorageInfo};
 use crate::ptp_mtp::data_types::PtpRead;
+use crate::camera_connection::CameraError;
 
 /// PTP容器信息结构体
 #[derive(Debug)]
@@ -54,50 +60,84 @@ impl PtpContainerInfo {
 }
 
 /// PTP相机类
-pub struct PtpCamera<'a> {
-    iface: u8,                    // 接口号
-    ep_in: u8,                    // 输入端点
-    ep_out: u8,                   // 输出端点
-    _ep_int: u8,                  // 中断端点
-    current_tid: u32,             // 当前事务ID
-    handle: libusb::DeviceHandle<'a>, // USB设备句柄
+pub struct PtpCamera {
+    iface: u8,                      // 接口号
+    ep_in: u8,                      // 输入端点
+    ep_out: u8,                     // 输出端点
+    _ep_int: u8,                    // 中断端点
+    current_tid: u32,               // 当前事务ID
+    handle: UsbDevice<'static>,     // Embassy-USB设备句柄
 }
 
-impl<'a> PtpCamera<'a> {
+impl PtpCamera {
     /// 创建新的PTP相机实例
-    pub fn new(device: &libusb::Device<'a>) -> Result<PtpCamera<'a>, Error> {
-        // 获取活动配置描述符
-        let config_desc = device.active_config_descriptor()?;
-
+    /// 
+    /// 使用异步API从USB设备初始化PTP相机
+    pub async fn new(device: UsbDevice<'static>) -> Result<PtpCamera, Error> {
+        // 获取配置描述符
+        let config = device.current_config_descriptor().await;
+        
         // 查找PTP/MTP接口（类代码为6）
-        let interface_desc = config_desc.interfaces()
-            .flat_map(|i| i.descriptors())
-            .find(|x| x.class_code() == 6)
-            .ok_or(libusb::Error::NotFound)?;
-
-        debug!("找到接口 {}", interface_desc.interface_number());
-
-        // 打开设备并声明接口
-        let mut handle = device.open()?;
-        handle.claim_interface(interface_desc.interface_number())?;
-        handle.set_alternate_setting(interface_desc.interface_number(), interface_desc.setting_number())?;
-
-        // 辅助函数：查找端点
-        let find_endpoint = |direction, transfer_type| {
-            interface_desc.endpoint_descriptors()
-                .find(|ep| ep.direction() == direction && ep.transfer_type() == transfer_type)
-                .map(|x| x.address())
-                .ok_or(libusb::Error::NotFound)
-        };
-
+        let mut interface_number = 0;
+        let mut interface_found = false;
+        let mut ep_in = 0;
+        let mut ep_out = 0;
+        let mut ep_int = 0;
+        
+        // 遍历所有接口查找PTP/MTP接口
+        for iface in config.interfaces() {
+            for alt_setting in iface.alt_settings() {
+                if alt_setting.class_code() == 6 {  // PTP/MTP类代码
+                    interface_number = iface.interface_number();
+                    interface_found = true;
+                    
+                    // 查找端点
+                    for endpoint in alt_setting.endpoints() {
+                        let addr = endpoint.address();
+                        
+                        // 根据端点类型和方向分配
+                        if endpoint.transfer_type() == embassy_usb::host::TransferType::Bulk {
+                            if endpoint.direction() == embassy_usb::host::Direction::In {
+                                ep_in = addr;
+                            } else {
+                                ep_out = addr;
+                            }
+                        } else if endpoint.transfer_type() == embassy_usb::host::TransferType::Interrupt
+                                  && endpoint.direction() == embassy_usb::host::Direction::In {
+                            ep_int = addr;
+                        }
+                    }
+                    break;
+                }
+            }
+            if interface_found {
+                break;
+            }
+        }
+        
+        if !interface_found {
+            return Err(Error::NotFound("未找到PTP/MTP接口".into()));
+        }
+        
+        // 确保找到了必要的端点
+        if ep_in == 0 || ep_out == 0 {
+            return Err(Error::NotFound("未找到必要的端点".into()));
+        }
+        
+        // 声明接口
+        device.claim_interface(interface_number).await
+              .map_err(|e| Error::USB(format!("无法声明接口: {:?}", e)))?;
+        
+        log::debug!("已找到并声明PTP/MTP接口 {}", interface_number);
+        
         // 创建PTP相机实例
         Ok(PtpCamera {
-            iface: interface_desc.interface_number(),
-            ep_in:  find_endpoint(libusb::Direction::In, libusb::TransferType::Bulk)?,
-            ep_out: find_endpoint(libusb::Direction::Out, libusb::TransferType::Bulk)?,
-            _ep_int: find_endpoint(libusb::Direction::In, libusb::TransferType::Interrupt)?,
+            iface: interface_number,
+            ep_in,
+            ep_out,
+            _ep_int: ep_int,
             current_tid: 0,
-            handle: handle,
+            handle: device,
         })
     }
 
@@ -109,12 +149,13 @@ impl<'a> PtpCamera<'a> {
     ///  - 响应状态阶段
     /// 注意: 每个阶段都涉及一个独立的USB传输，`timeout`用于每个阶段，
     /// 所以总时间可能会超过`timeout`。
-    pub fn command(&mut self,
-                   code: CommandCode,
-                   params: &[u32],
-                   data: Option<&[u8]>,
-                   timeout: Option<Duration>)
-                   -> Result<Vec<u8>, Error> {
+    pub async fn command(
+        &mut self,
+        code: CommandCode,
+        params: &[u32],
+        data: Option<&[u8]>,
+        timeout: Option<Duration>
+    ) -> Result<Vec<u8>, Error> {
 
         // 超时为0表示无限超时
         let timeout = timeout.unwrap_or(Duration::new(0, 0));
@@ -130,18 +171,18 @@ impl<'a> PtpCamera<'a> {
         }
 
         // 写入事务的命令阶段
-        self.write_txn_phase(PtpContainerType::Command, code, tid, &request_payload, timeout)?;
+        self.write_txn_phase(PtpContainerType::Command, code, tid, &request_payload, timeout).await?;
 
         // 如果有数据，写入数据阶段
         if let Some(data) = data {
-            self.write_txn_phase(PtpContainerType::Data, code, tid, data, timeout)?;
+            self.write_txn_phase(PtpContainerType::Data, code, tid, data, timeout).await?;
         }
 
         // 命令阶段之后是数据阶段(可选)和响应阶段
         // 读取这两个阶段，检查响应的状态，并返回数据载荷(如果有)
         let mut data_phase_payload = vec![];
         loop {
-            let (container, payload) = self.read_txn_phase(timeout)?;
+            let (container, payload) = self.read_txn_phase(timeout).await?;
             if !container.belongs_to(tid) {
                 return Err(Error::Malformed(format!("事务ID不匹配，收到{}，期望{}", container.tid, tid)));
             }
@@ -161,8 +202,8 @@ impl<'a> PtpCamera<'a> {
     }
 
     /// 写入事务阶段
-    fn write_txn_phase(&mut self, kind: PtpContainerType, code: CommandCode, tid: u32, payload: &[u8], timeout: Duration) -> Result<(), Error> {
-        trace!("写入 {:?} - 0x{:04x} ({}), tid:{}", kind, code, StandardCommandCode::name(code).unwrap_or("未知"), tid);
+    async fn write_txn_phase(&mut self, kind: PtpContainerType, code: CommandCode, tid: u32, payload: &[u8], timeout: Duration) -> Result<(), Error> {
+        log::trace!("写入 {:?} - 0x{:04x} ({}), tid:{}", kind, code, StandardCommandCode::name(code).unwrap_or("未知"), tid);
 
         // 块大小，必须是端点包大小的倍数
         const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
@@ -179,26 +220,37 @@ impl<'a> PtpCamera<'a> {
         
         // 添加载荷的第一部分
         buf.extend_from_slice(&payload[..first_chunk_payload_bytes]);
-        self.handle.write_bulk(self.ep_out, &buf, timeout)?;
+        
+        // 转换为Embassy Duration
+        let embassy_timeout = EmbassyDuration::from_millis(timeout.as_millis() as u64);
+        
+        // 使用Embassy的异步API进行批量写入
+        self.handle.bulk_out(self.ep_out, &buf, embassy_timeout).await
+            .map_err(|e| Error::USB(format!("批量写入失败: {:?}", e)))?;
 
         // 写入后续块，直接从源切片读取
         for chunk in payload[first_chunk_payload_bytes..].chunks(CHUNK_SIZE) {
-            self.handle.write_bulk(self.ep_out, chunk, timeout)?;
+            self.handle.bulk_out(self.ep_out, chunk, embassy_timeout).await
+                .map_err(|e| Error::USB(format!("批量写入失败: {:?}", e)))?;
         }
 
         Ok(())
     }
 
     /// 读取事务阶段的辅助方法
-    fn read_txn_phase(&mut self, timeout: Duration) -> Result<(PtpContainerInfo, Vec<u8>), Error> {
-        // 缓冲区在栈上分配，大小足以容纳大多数命令/控制数据
-        // 标记为未初始化以避免为8k内存清零
-        let mut unintialized_buf: [u8; 8 * 1024];
-        let buf = unsafe {
-            unintialized_buf = ::std::mem::uninitialized();
-            let n = self.handle.read_bulk(self.ep_in, &mut unintialized_buf[..], timeout)?;
-            &unintialized_buf[..n]
-        };
+    async fn read_txn_phase(&mut self, timeout: Duration) -> Result<(PtpContainerInfo, Vec<u8>), Error> {
+        // 为读取分配缓冲区
+        let mut buffer = [0u8; 8 * 1024]; // 8KB缓冲区
+        
+        // 转换为Embassy Duration
+        let embassy_timeout = EmbassyDuration::from_millis(timeout.as_millis() as u64);
+        
+        // 使用Embassy的异步API进行批量读取
+        let n = self.handle.bulk_in(self.ep_in, &mut buffer, embassy_timeout).await
+            .map_err(|e| Error::USB(format!("批量读取失败: {:?}", e)))?;
+            
+        // 复制数据以便进一步处理
+        let buf = &buffer[..n];
 
         // 解析容器信息
         let cinfo = PtpContainerInfo::parse(&buf[..])?;
@@ -348,35 +400,36 @@ impl<'a> PtpCamera<'a> {
     }
 
     /// 获取设备信息
-    pub fn get_device_info(&mut self, timeout: Option<Duration>) -> Result<PtpDeviceInfo, Error> {
-        let data = self.command(StandardCommandCode::GetDeviceInfo, &[0, 0, 0], None, timeout)?;
+    pub async fn get_device_info(&mut self, timeout: Option<Duration>) -> Result<PtpDeviceInfo, Error> {
+        let response = self.command(StandardCommandCode::GetDeviceInfo, &[], None, timeout).await?;
 
-        let device_info = PtpDeviceInfo::decode(&data)?;
+        let device_info = PtpDeviceInfo::decode(&response)?;
         debug!("设备信息 {:?}", device_info);
         Ok(device_info)
     }
 
     /// 打开会话
-    pub fn open_session(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
-        let session_id = 3; // 会话ID，通常可以是任意非零值
+    pub async fn open_session(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
+        let session_id = 1; // 会话ID = 1
 
-        self.command(StandardCommandCode::OpenSession,
-                     &vec![session_id, 0, 0],
-                     None, timeout)?;
-
+        let _response = self.command(StandardCommandCode::OpenSession,
+                              &[session_id], // 会话ID = 1
+                              None,
+                              timeout).await?;
         Ok(())
     }
 
     /// 关闭会话
-    pub fn close_session(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
-        self.command(StandardCommandCode::CloseSession, &[], None, timeout)?;
+    pub async fn close_session(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
+        let _response = self.command(StandardCommandCode::CloseSession, &[], None, timeout).await?;
         Ok(())
     }
 
     /// 断开连接
-    pub fn disconnect(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
-        self.close_session(timeout)?;
-        self.handle.release_interface(self.iface)?;
+    pub async fn disconnect(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
+        self.close_session(timeout).await?;
+        self.handle.release_interface(self.iface).await
+            .map_err(|e| Error::USB(format!("无法释放接口: {:?}", e)))?;
         Ok(())
     }
 }

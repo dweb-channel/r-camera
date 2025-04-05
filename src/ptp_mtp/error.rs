@@ -12,8 +12,11 @@ pub enum Error {
     /// 收到的数据格式错误
     Malformed(String),
 
-    /// USB 相关错误
-    Usb(libusb::Error),
+    /// USB 相关错误(通用错误描述)
+    USB(String),
+    
+    /// 在查找或使用资源时出错
+    NotFound(String),
 
     /// IO 操作错误
     Io(io::Error),
@@ -21,28 +24,36 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::Response(r) => write!(f, "{} (0x{:04x})", crate::ptp_mtp::standard_codes::StandardResponseCode::name(r).unwrap_or("未知错误"), r),
-            Error::Usb(ref e) => write!(f, "USB 错误: {}", e),
-            Error::Io(ref e) => write!(f, "IO 错误: {}", e),
-            Error::Malformed(ref e) => write!(f, "{}", e),
+        match self {
+            Error::Response(r) => write!(f, "{} (0x{:04x})", crate::ptp_mtp::standard_codes::StandardResponseCode::name(*r).unwrap_or("未知错误"), r),
+            Error::USB(e) => write!(f, "USB 错误: {}", e),
+            Error::Io(e) => write!(f, "IO 错误: {}", e),
+            Error::Malformed(e) => write!(f, "{}", e),
+            Error::NotFound(e) => write!(f, "未找到: {}", e),
         }
     }
 }
 
 impl ::std::error::Error for Error {
-    fn cause(&self) -> Option<& dyn ::std::error::Error> {
-        match *self {
-            Error::Usb(ref e) => Some(e),
-            Error::Io(ref e) => Some(e),
+    fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
+        match self {
+            Error::Io(e) => Some(e),
             _ => None,
         }
     }
 }
 
-impl From<libusb::Error> for Error {
-    fn from(e: libusb::Error) -> Error {
-        Error::Usb(e)
+// 从字符串创建USB错误
+impl From<String> for Error {
+    fn from(e: String) -> Error {
+        Error::USB(e)
+    }
+}
+
+// 从&str创建USB错误
+impl From<&str> for Error {
+    fn from(e: &str) -> Error {
+        Error::USB(e.to_string())
     }
 }
 
